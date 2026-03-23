@@ -439,41 +439,32 @@ class AgentExchangeClient:
                     logger.warning(f"Failed to cancel regular orders for {symbol}: {e}")
 
             if self.exchange_id == "bitget":
-                # ccxt cancel_all_orders는 일반 주문만 취소 — plan(stop/TP) 주문은 별도 취소
-                # CCXT의 필터링 누락 방지 및 파라미터 에러 방지를 위해 최소 파라미터로 네이티브 전체 조회 후 자체 필터링
-                canceled_count = 0
-                for plan_type in ["plan", "profit_loss", "pos_profit"]:
-                    try:
-                        pending_resp = await self.exchange.private_mix_get_v2_mix_order_orders_plan_pending({
-                            "productType": "USDT-FUTURES",
-                            "isPlan": plan_type
-                        })
-                        data = pending_resp.get("data") or {}
-                        entrusted_list = data.get("entrustedList", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                # ccxt cancel_all_orders는 일반 주문만 취소 — plan(stop/TP) 주문은 네이티브 API로 일괄 취소
+                # V2 API의 cancel-plan-order에 orderId를 생략하여 심볼 단위 일괄 취소 유도
+                try:
+                    await self.exchange.private_mix_post_v2_mix_order_cancel_plan_order({
+                        "symbol": symbol,
+                        "productType": "USDT-FUTURES",
+                        "marginCoin": "USDT",
+                    })
+                    logger.info(f"All plan orders batch-cancelled natively for {symbol}")
+                except Exception as ce:
+                    # 22001 (취소할 주문 없음), 400172 (파라미터 에러 - 플랜타입 필요시 대비) 무시
+                    if "22001" not in str(ce) and "400171" not in str(ce):
+                        logger.warning(f"Failed to batch cancel plan orders for {symbol}: {ce}")
                         
-                        for p_order in entrusted_list:
-                            # 우리가 원하는 심볼의 주문만 취소
-                            if p_order.get("symbol") != symbol:
-                                continue
-                                
-                            order_id = p_order.get("orderId")
-                            if order_id:
-                                try:
-                                    await self.exchange.private_mix_post_v2_mix_order_cancel_plan_order({
-                                        "orderId": order_id,
-                                        "marginCoin": "USDT",
-                                        "productType": "USDT-FUTURES",
-                                        "symbol": symbol
-                                    })
-                                    canceled_count += 1
-                                except Exception as ce:
-                                    logger.warning(f"Failed to cancel native plan order {order_id}: {ce}")
-                    except Exception as pe:
-                        if "400172" not in str(pe):
-                            logger.warning(f"Failed to fetch {plan_type} orders for {symbol}: {pe}")
-                
-                if canceled_count > 0:
-                    logger.info(f"Cancelled {canceled_count} plan orders for {symbol}")
+                # 400172 방어를 위해 각 planType 명시적 일괄 취소도 병행
+                for p_type in ["profit_plan", "pos_loss", "pos_profit", "normal_plan"]:
+                    try:
+                        await self.exchange.private_mix_post_v2_mix_order_cancel_plan_order({
+                            "symbol": symbol,
+                            "productType": "USDT-FUTURES",
+                            "marginCoin": "USDT",
+                            "planType": p_type
+                        })
+                    except Exception:
+                        pass
+
 
             logger.info(f"All open orders cancelled for {symbol}")
             return True
